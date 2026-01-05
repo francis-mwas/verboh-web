@@ -32,7 +32,7 @@ export default function VoiceButton() {
     analyserRef.current = analyser;
     dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
 
-    // Setup MediaRecorder
+    // MediaRecorder setup
     const mediaRecorder = new MediaRecorder(stream);
     recordedChunksRef.current = [];
     mediaRecorder.ondataavailable = (event) => {
@@ -60,17 +60,17 @@ export default function VoiceButton() {
     });
   };
 
-  // Amplitude-based VAD
+  // Amplitude-based VAD (auto-stop)
   const monitorVolume = () => {
     if (!recording || !analyserRef.current || !dataArrayRef.current) return;
 
-    // Allocate a fresh Uint8Array for TS & avoid SharedArrayBuffer issues
+    // Copy data into a normal Uint8Array to satisfy TS
     const arr = new Uint8Array(dataArrayRef.current.length);
     analyserRef.current.getByteFrequencyData(arr);
 
     const avg = Array.from(arr).reduce((a, b) => a + b, 0) / arr.length;
-
     const threshold = 5;
+
     if (avg < threshold) {
       stopRecording()
         .then(async (blob) => {
@@ -88,18 +88,18 @@ export default function VoiceButton() {
     rafRef.current = requestAnimationFrame(monitorVolume);
   };
 
-  // Play welcome + start recording
+  // Handle button click
   const handleClick = async () => {
     if (!recording) {
       try {
-        // 1️⃣ Play welcome audio
+        // Play welcome note first
         const welcomeResponse = await fetch(
           `${API_BASE_URL}/api/v1/voice/welcome`
         );
         const welcomeArrayBuffer = await welcomeResponse.arrayBuffer();
         await playAudio(welcomeArrayBuffer);
 
-        // 2️⃣ Start recording after welcome
+        // Then start recording
         await startRecording();
       } catch (err) {
         console.error('Voice interaction error:', err);
@@ -116,17 +116,14 @@ export default function VoiceButton() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center">
-      <Card className="p-6 space-y-4 text-center">
-        <h1 className="text-xl font-semibold">Coop Verboh Simulator</h1>
-        <Button
-          onClick={handleClick}
-          disabled={voiceMutation.isPending}
-          className="bg-green-600 hover:bg-green-700 text-white w-24 h-24 rounded-full flex items-center justify-center text-2xl shadow-lg"
-        >
-          {recording ? '🎤' : '🎙️'}
-        </Button>
-      </Card>
+    <main className="flex  items-center justify-center">
+      <Button
+        onClick={handleClick}
+        disabled={voiceMutation.isPending}
+        className="bg-green-600 hover:bg-green-700 text-white w-24 h-24 rounded-full flex items-center justify-center text-2xl shadow-lg transition-colors"
+      >
+        {recording ? '🎤' : '🎙️'}
+      </Button>
     </main>
   );
 }
