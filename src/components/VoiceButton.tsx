@@ -2,52 +2,67 @@
 
 import { useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
 import { useVoiceRequest } from '@/hooks/useVoiceRequest';
 import { playAudio } from '@/lib/audio';
 import { API_BASE_URL } from '@/lib/api';
 
 export default function VoiceButton() {
   const [recording, setRecording] = useState(false);
+
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const dataArrayRef = useRef<Uint8Array | null>(null);
-  const rafRef = useRef<number | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+
+  const dataArrayRef = useRef<Uint8Array | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const rafRef = useRef<number | null>(null);
+
+  const hasPlayedWelcomeRef = useRef(false);
+  const autoStoppedRef = useRef(false);
 
   const voiceMutation = useVoiceRequest();
 
-  // Start recording
+  // ------------------ START RECORDING ------------------
   const startRecording = async () => {
+    autoStoppedRef.current = false;
+
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
     const audioContext = new AudioContext();
     audioContextRef.current = audioContext;
 
     const source = audioContext.createMediaStreamSource(stream);
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 2048;
-    source.connect(analyser);
 
+    source.connect(analyser);
     analyserRef.current = analyser;
+
     dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
 
-    // MediaRecorder setup
     const mediaRecorder = new MediaRecorder(stream);
     recordedChunksRef.current = [];
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordedChunksRef.current.push(e.data);
     };
-    mediaRecorder.start();
+
     mediaRecorderRef.current = mediaRecorder;
+    mediaRecorder.start();
 
     setRecording(true);
+
+    // Ensure recorder is actually running before monitoring
+    await new Promise((resolve) => {
+      mediaRecorder.onstart = () => resolve(true);
+    });
+
     monitorVolume();
   };
 
-  // Stop recording and return Blob
-  const stopRecording = async (): Promise<Blob | null> => {
-    if (!mediaRecorderRef.current) return null;
+  // ------------------ STOP RECORDING ------------------
+  const stopRecording = (): Promise<Blob | null> => {
+    if (!mediaRecorderRef.current) return Promise.resolve(null);
 
     return new Promise((resolve) => {
       mediaRecorderRef.current!.onstop = () => {
@@ -56,67 +71,82 @@ export default function VoiceButton() {
         });
         resolve(blob);
       };
+
       mediaRecorderRef.current!.stop();
     });
   };
 
-  // Amplitude-based VAD (auto-stop)
+  // ------------------ AUTO VAD ------------------
   const monitorVolume = () => {
-    if (!recording || !analyserRef.current || !dataArrayRef.current) return;
+    if (
+      !recording ||
+      !analyserRef.current ||
+      !dataArrayRef.current ||
+      autoStoppedRef.current
+    ) {
+      return;
+    }
 
-    // Copy data into a normal Uint8Array to satisfy TS
     const arr = new Uint8Array(dataArrayRef.current.length);
     analyserRef.current.getByteFrequencyData(arr);
 
-    const avg = Array.from(arr).reduce((a, b) => a + b, 0) / arr.length;
-    const threshold = 5;
+    const avg = arr.reduce((sum, v) => sum + v, 0) / arr.length;
 
-    if (avg < threshold) {
+    const SILENCE_THRESHOLD = 5;
+
+    if (avg < SILENCE_THRESHOLD) {
+      autoStoppedRef.current = true;
+      setRecording(false);
+
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
       stopRecording()
         .then(async (blob) => {
-          if (blob) {
+          if (blob && blob.size > 0) {
             const responseBuffer = await voiceMutation.mutateAsync(blob);
             await playAudio(responseBuffer);
           }
         })
         .catch(console.error);
 
-      setRecording(false);
       return;
     }
 
     rafRef.current = requestAnimationFrame(monitorVolume);
   };
 
-  // Handle button click
+  // ------------------ BUTTON HANDLER ------------------
   const handleClick = async () => {
-    if (!recording) {
-      try {
-        // Play welcome note first
-        const welcomeResponse = await fetch(
-          `${API_BASE_URL}/api/v1/voice/welcome`
-        );
-        const welcomeArrayBuffer = await welcomeResponse.arrayBuffer();
-        await playAudio(welcomeArrayBuffer);
+    try {
+      if (!recording) {
+        // Welcome plays once per page session
+        if (!hasPlayedWelcomeRef.current) {
+          hasPlayedWelcomeRef.current = true;
 
-        // Then start recording
+          const res = await fetch(`${API_BASE_URL}/api/v1/voice/welcome`);
+          const buf = await res.arrayBuffer();
+          await playAudio(buf);
+        }
+
         await startRecording();
-      } catch (err) {
-        console.error('Voice interaction error:', err);
+      } else {
+        // Manual stop fallback
+        setRecording(false);
+
+        const blob = await stopRecording();
+        if (blob && blob.size > 0) {
+          const responseBuffer = await voiceMutation.mutateAsync(blob);
+          await playAudio(responseBuffer);
+        }
       }
-    } else {
-      // Stop manually
-      const blob = await stopRecording();
-      if (blob) {
-        const responseBuffer = await voiceMutation.mutateAsync(blob);
-        await playAudio(responseBuffer);
-      }
-      setRecording(false);
+    } catch (err) {
+      console.error('Voice error:', err);
     }
   };
 
+  // ------------------ UI ------------------
   return (
-    <main className="flex  items-center justify-center">
+    <main className="flex items-center justify-center">
       <Button
         onClick={handleClick}
         disabled={voiceMutation.isPending}
